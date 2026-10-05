@@ -1,130 +1,67 @@
-# fleet-template-v1
+# Hibernate ORM template
 
-## What This Template Is
+Provisioned from [`Qode-Fleet-Control/fleet-template-v1`](https://github.com/Qode-Fleet-Control/fleet-template-v1) — the fleet
+lifecycle contract (`bin/`, `fleet.conf`, deploy workflows) with a
+Hibernate ORM persistence starter laid on top.
 
-`fleet-template-v1` is a **language-agnostic app lifecycle harness** for apps
-managed by the fleet platform. It gives any app — Node, Python, Go, a Docker
-Compose stack, anything — a uniform way to be deployed and controlled, without
-the fleet needing to know a single thing about your stack.
+Hibernate ORM 7.4 on Java 21, Maven build. Two entities (`Author`, `Book` with a `@ManyToOne`), and a job (`world.qode.app.Main`) that persists a few rows and queries them back with HQL. It runs against an in-memory **H2** database by default, or against the Postgres named by **`DATABASE_URL`** (`postgres://user:pass@host:port/db`, as the fleet injects it) when that is set.
 
-The fleet injects runtime variables into the environment (`PORT`, `BASE_PATH`,
-`DATABASE_URL`) and calls `./bin/run` to deploy. Everything project-specific —
-how to install, build, and start your app — lives in **one file: `fleet.conf`**.
-That is the only file you edit per project.
+## Origin
 
-## Repository Structure
+Hand-written — Hibernate ORM ships no project generator. Laid out after the Hibernate 7
+"Introduction to Hibernate" guide: annotated entities, a `SessionFactory` built in code with
+`HibernatePersistenceConfiguration` (no `persistence.xml`), work done in `inTransaction` /
+`fromTransaction`, queries as HQL selection queries.
 
-```
-fleet.conf        ← the only file you edit per project
-.env              ← local-only env vars (gitignored)
-bin/
-  _common.sh      ← shared logic; never edit this
-  run             ← install + build + start (called by the fleet)
-  start           ← start only (no rebuild)
-  restart         ← stop + full run
-  reload          ← hot-reload config without rebuild
-  stop            ← stop the running process
-```
+## Verified
 
-## The One File You Edit: `fleet.conf`
+**Not yet verified end to end on docker.** On 2026-10-05 the shared docker host's disk sat at
+0-1 GB free for over 90 minutes (other builds were running), under the 6 GB floor this
+scaffold's verification requires, so the `docker compose` build/run check was not run.
+Run it before trusting the image:
 
-`fleet.conf` is sourced as shell by the lifecycle scripts. Fill in the commands
-for your stack; leave any command empty (`''`) to skip that step.
+    docker compose build && docker compose run --rm app              # must exit 0
 
-```sh
-NAME="my-app"           # label shown in fleet logs
-PORT="3000"             # default port (fleet overrides via $PORT env var)
-HEALTH_PATH="/"         # HTTP path that returns 200 when the app is ready
+What did pass, on 2026-10-05:
 
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/server.js'   # must listen on $PORT; run in foreground
-RELOAD_CMD=''           # optional; empty → falls back to stop+start
-```
+- `mvn -B package` **with the test suite** in `maven:3.9-eclipse-temurin-21` (the Dockerfile's
+  build image) — compiles, tests green, artifacts produced.
 
-> **Critical rule:** single-quote any command that uses `$PORT` or
-> `$BASE_PATH`. Single quotes defer variable expansion to **runtime** — when the
-> command actually runs, with the fleet-injected value — rather than at the
-> moment `fleet.conf` is sourced (when those values aren't set yet). Use
-> `START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'`, never double quotes.
+## Run it
 
-## How the Lifecycle Works
+**This repo is not a service.** It is a job: the image's default command runs the Hibernate job (`java -jar /app/app.jar`)
+and exits 0 on success (non-zero on failure). `START_CMD` and `DOCKER_START_CMD`
+are empty and nothing listens on `$PORT`, so on the fleet `bin/run` builds the
+image and stops there.
 
-| Script | What it does | When to use |
-| --- | --- | --- |
-| `bin/run` | `INSTALL_CMD` → `BUILD_CMD` → `START_CMD` | Fleet deploy, fresh start |
-| `bin/start` | `START_CMD` only | Restart without rebuild |
-| `bin/restart` | stop + `bin/run` | After a code/dep change |
-| `bin/reload` | `RELOAD_CMD`, or stop+start if empty | After a config-only change |
-| `bin/stop` | Kill by pidfile or port | Tear down |
+**With docker:**
 
-> The process PID is written to `.fleet/app.pid` so subsequent `stop`/`restart`
-> calls can find and terminate it reliably. If the pidfile is missing or stale,
-> `stop` falls back to freeing whatever is listening on `$PORT`.
+    docker compose build
+    docker compose run --rm app          # runs the job
+    DATABASE_URL=postgres://u:p@host:5432/db docker compose run --rm app   # against Postgres
 
-## How to Apply This to Your Project
+**Without docker** — a JDK 21 and Maven 3.9 (`mvn`) on `PATH`:
 
-### Step 1 — Copy the template into your repo
+| step | command |
+|---|---|
+| install | `mvn -B -q dependency:go-offline` |
+| build | `mvn -B -q package` |
+| run the job | `java -jar target/app.jar` |
 
-```sh
-cp -r fleet-template-v1/* my-project/
-```
+If you add an HTTP endpoint, listen on `0.0.0.0:$PORT` and serve at `/`, then set
+`PORT`, `HEALTH_PATH`, `START_CMD` and `DOCKER_START_CMD` in `fleet.conf` and
+publish the port in `compose.yaml` (see the HTTP templates).
 
-Or, if starting fresh, just clone it and work from `main`.
+## Layout
 
-### Step 2 — Edit `fleet.conf` (the only required change)
+- `src/main/java/world/qode/app/Author.java`, `Book.java` — the entities.
+- `src/main/java/world/qode/app/Database.java` — `DATABASE_URL` → JDBC URL + credentials (H2 when unset), and the `SessionFactory`. Schema: `create-drop` on H2; on a real database only `update` (never dropped) — use a migration tool for a real schema.
+- `src/main/java/world/qode/app/Main.java` — the job.
+- `src/test/java/...` — URL parsing and a persist/query round trip on H2 (run by the image build).
+- `pom.xml` — `target/app.jar` with its runtime jars copied to `target/lib`.
 
-Fill in your stack's commands. Per-stack examples:
+## What differs from stock output
 
-```sh
-# Node.js
-INSTALL_CMD='npm ci'
-BUILD_CMD='npm run build'
-START_CMD='node dist/index.js'
-
-# Python (Gunicorn)
-INSTALL_CMD='pip install -r requirements.txt'
-BUILD_CMD=''
-START_CMD='gunicorn app:app --bind 0.0.0.0:$PORT'
-
-# Go
-INSTALL_CMD=''
-BUILD_CMD='go build -o ./out/server ./cmd/server'
-START_CMD='./out/server'
-
-# Docker Compose
-INSTALL_CMD=''
-BUILD_CMD='docker compose build'
-START_CMD='docker compose up'
-RELOAD_CMD='docker compose up -d --no-build'
-```
-
-### Step 3 — Set local env vars in `.env` (gitignored)
-
-```sh
-APP_NAME=My App
-DATABASE_URL=postgres://localhost/mydb
-```
-
-### Step 4 — Verify standalone
-
-```sh
-PORT=3001 bin/run      # should install, build, and serve on 3001
-curl http://localhost:3001/   # should 200
-```
-
-### Step 5 — Connect to the fleet
-
-Point the fleet at your repo. It will clone it, inject `PORT` / `BASE_PATH` /
-`DATABASE_URL`, and call `bin/run`. As long as your `START_CMD` listens on
-`$PORT` and `HEALTH_PATH` returns 200, the fleet will mark the app healthy.
-
-## Key Invariants
-
-- **`START_CMD` must run in the foreground and listen on `$PORT`.** Do not use a
-  dev server — HMR / hot-reload chunks 404 behind the ingress and will break the
-  app.
-- **Never put secrets in `fleet.conf`** — it's committed. Use `.env` locally;
-  the fleet injects secrets via the environment.
-- **`bin/_common.sh` is shared infrastructure** — don't edit it per project. All
-  project-specific configuration belongs in `fleet.conf`.
+- No generator exists; everything above is hand-written (see Origin).
+- No database service in `compose.yaml`: the job brings its own embedded H2, and the fleet's Postgres comes in through `DATABASE_URL`.
+- Added the fleet harness: `bin/`, `fleet.conf`, `Dockerfile`, `compose.yaml`, `.dockerignore`, `.gitignore`, `.github/workflows/`, `docs/fleet-lifecycle.md`.
